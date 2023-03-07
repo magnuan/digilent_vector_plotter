@@ -1,6 +1,13 @@
+/* An atempt to stream a continuous datastream to the singnal generator wiht the funcPlay mode
+ * With an analog discovery2 on USB it can handle about 200kS/s without too much problem
+ * With an analog discovery PRO running the program itself, about 500kS/s
+*/
+
 #include "sample.h"
 #include "cmath.h"
 #include <time.h>
+#include <math.h>
+#include <climits>
 
 static char verbose = 0;
 
@@ -24,12 +31,24 @@ int read_path_from_csv(char* fname, float data[][2], int max_len){
         float x,y;
         int ii = sscanf(line,"%f,%f",&x, &y);
 		if (ii>=2){
-            data[cnt][0]=x;
-            data[cnt][1]=y;
+            data[cnt][0]=y;
+            data[cnt][1]=x;
             cnt++;
         }
     }
     return cnt;
+}
+
+int gen_demo_path(float data[][2], int max_len){
+    for (int ix=0;ix<max_len;ix++){
+        float phase = (float)ix/float(max_len)*2*M_PI;
+        float x,y;
+        x = (1+sinf(phase))/2;
+        y = (1+cosf(phase))/2;
+        data[ix][0]=y;
+        data[ix][1]=x;
+    }
+    return max_len;
 }
 
 
@@ -53,13 +72,16 @@ void showUsage(char *pgmname)
 
 int main(int argc,char *argv[]){
 
-    #define MAX_PATH_LENGTH 65536
+    #define MAX_PATH_LENGTH 8*32768
     
 	int c;
     float path_data[MAX_PATH_LENGTH][2];
     int path_len;
     float Fs = 1000.;
 	
+    path_len = gen_demo_path(path_data,MAX_PATH_LENGTH);
+
+
     /**** PARSING COMMAND LINE OPTIONS ****/
     while ((c = getopt (argc, argv, "c:m:F:?hV")) != -1) {
 		switch (c) {
@@ -110,38 +132,54 @@ int main(int argc,char *argv[]){
     #else
     int nDev;
     //Enumerating all Analog Discovery 2 devices
-    FDwfEnum(3, &nDev); 
+    //FDwfEnum(3, &nDev); 
+    //Enumerating all suported devices
+    FDwfEnum(0, &nDev); 
+    printf("%d devices found\n", nDev);
+    for (int dix = 0; dix<nDev;dix++){
+        int used;
+        char user_name[32];
+        char device_name[32];
+        char serial[32];
+        
+        FDwfEnumDeviceIsOpened(dix, &used);
+        FDwfEnumUserName(dix, user_name);
+        FDwfEnumDeviceName(dix, device_name);
+        FDwfEnumSN(dix, serial);
+        printf("Device %d:\t %s \tSN:%s \t%s \t%s\n", dix, device_name, serial, used?"in use":"free", user_name);
 
+    }
+    
+    int dix = 0;    //Hardcoded to use first available device
+    printf("Using device %d\n",dix);
     int config_max = 0;
     int config_index = 0;
-    for (int dix = 0; dix<nDev;dix++){
-        int nConf;
-        FDwfEnumConfig(dix, &nConf);
-        for (int cix=0;cix<nConf;cix++){
-            int val;
-            /*for (int iix=1;iix<=10;iix++){
-                FDwfEnumConfigInfo(cix,iix,&val);
-                printf("Dev: %d  config: %d info: %d  val: %d\n",dix,cix,iix,val);
-            }*/
-
-            FDwfEnumConfigInfo(cix,8,&val); //Read out DECIAnalogOutBufferSize 
-            if (val>config_max){
-                config_max = val;
-                config_index = cix;
-            }
+    
+    int nConf;
+    FDwfEnumConfig(dix, &nConf);
+    for (int cix=0;cix<nConf;cix++){
+        int val;
+        /*for (int iix=1;iix<=10;iix++){
+            FDwfEnumConfigInfo(cix,iix,&val);
+            printf("Dev: %d  config: %d info: %d  val: %d\n",dix,cix,iix,val);
+        }*/
+    
+        // Find configuration with largest Analog Out Buffer Size  (param 8)
+        FDwfEnumConfigInfo(cix,8,&val); //Read out DECIAnalogOutBufferSize 
+        if (val>config_max){
+            config_max = val;
+            config_index = cix;
         }
-        printf("Dev %d  Config %d has longest DECIAnalogOutBufferSize, %d samples\n",dix, config_index, config_max);
     }
-    printf("Open device %d with config %d\n",0,config_index);
-    if(!FDwfDeviceConfigOpen(0,config_index, &hdwf)) {
+    printf("Dev %d  Config %d has longest DECIAnalogOutBufferSize, %d samples\n",dix, config_index, config_max);
+
+    printf("Open device %d with config %d\n",dix,config_index);
+    if(!FDwfDeviceConfigOpen(dix,config_index, &hdwf)) {
         FDwfGetLastErrorMsg(szError);
         printf("Device open failed\n\t%s", szError);
         return 0;
-    
     }
     #endif
-
-    
 
    
     
@@ -169,7 +207,7 @@ int main(int argc,char *argv[]){
 
         // 2V amplitude, 4V pk2pk, for sample value -1 will output -2V, for 1 +2V
         // normalized to ±1 values
-        FDwfAnalogOutNodeAmplitudeSet(hdwf, ch, AnalogOutNodeCarrier, 5);
+        FDwfAnalogOutNodeAmplitudeSet(hdwf, ch, AnalogOutNodeCarrier, 1);
     }
     if (single_frame){
         FDwfAnalogOutNodeFunctionSet(hdwf, 0, AnalogOutNodeCarrier, funcCustom);
@@ -207,8 +245,8 @@ int main(int argc,char *argv[]){
         time_t t0 = time(NULL);
         time_t t1 = time(NULL);
 
-        while ((t1-t0)<5){
-            
+        while ((t1-t0)<10){
+            int transfer_size = INT_MAX;        
             for (int ch=0;ch<2;ch++){
                 //printf("LOOP %d: Samples left = %d\n",loop,samples_left);
                 //Wait untill a minimum number of transfres are possible
@@ -223,18 +261,24 @@ int main(int argc,char *argv[]){
                 if (data_lost || data_corrupted){
                     printf("CH %d free:%d lost:%d corrupted:%d\n",ch,data_free,data_lost, data_corrupted);
                 }
-                if (data_free>512){
+                transfer_size = MIN(transfer_size,data_free);
+            }
+            if (transfer_size>(SamplesMax/4)){
+                for (int ch=0;ch<2;ch++){
+
                     //Calculate number of samples to copy from circular input buffer
-                    int block1_len = MIN(path_len - path_offset[ch], data_free);
-                    int block2_len = data_free-block1_len;
+                    int block1_len = MIN(path_len - path_offset[ch], transfer_size);
+                    int block2_len = transfer_size-block1_len;
                     for (int ix=0; ix < block1_len;ix++){
                         xSamples[ix] = path_data[ix+path_offset[ch]][ch];
                     }
                     for (int ix=0; ix < block2_len;ix++){
                         xSamples[block1_len+ix] = path_data[ix][ch];
                     }
-                    FDwfAnalogOutNodePlayData(hdwf, ch, AnalogOutNodeCarrier,xSamples,data_free); 
-                    path_offset[ch] = (path_offset[ch]+data_free)%path_len;
+                    FDwfAnalogOutNodePlayData(hdwf, ch, AnalogOutNodeCarrier,xSamples,transfer_size); 
+                    //printf("Loading %d samples to ch %d   offset = %d\n", transfer_size,ch, path_offset[ch]);
+                    
+                    path_offset[ch] = (path_offset[ch]+transfer_size)%path_len;
                 }
             }
             t1 = time(NULL);
