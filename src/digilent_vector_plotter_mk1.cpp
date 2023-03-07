@@ -1,4 +1,6 @@
-/* An atempt to stream one by one frame, unsyncronized  with the funcCustom mode
+/* An atempt to stream a continuous datastream to the singnal generator wiht the funcPlay mode
+ * With an analog discovery2 on USB it can handle about 200kS/s without too much problem
+ * With an analog discovery PRO running the program itself, about 500kS/s
 */
 
 #include "sample.h"
@@ -37,25 +39,16 @@ int read_path_from_csv(char* fname, float data[][2], int max_len){
     return cnt;
 }
 
-int gen_demo_path(double xdata[], double ydata[], int len, int mode ){
-    for (int ix=0;ix<len;ix++){
-        float phase = (float)ix/float(len)*2*M_PI;
+int gen_demo_path(float data[][2], int max_len){
+    for (int ix=0;ix<max_len;ix++){
+        float phase = (float)ix/float(max_len)*2*M_PI;
         float x,y;
-        switch (mode){
-            case 0:
-            default:
-                x = (0+sinf(phase))/2;
-                y = (0+cosf(phase))/2;
-                break;
-            case 1:
-                x = (0+sinf(phase))/2;
-                y = (0+sinf(2*phase))/2;
-                break;
-        }
-        ydata[ix]=y;
-        xdata[ix]=x;
+        x = (1+sinf(phase))/2;
+        y = (1+cosf(phase))/2;
+        data[ix][0]=y;
+        data[ix][1]=x;
     }
-    return len;
+    return max_len;
 }
 
 
@@ -82,20 +75,23 @@ int main(int argc,char *argv[]){
     #define MAX_PATH_LENGTH 8*32768
     
 	int c;
+    float path_data[MAX_PATH_LENGTH][2];
+    int path_len;
     float Fs = 1000.;
 	
+    path_len = gen_demo_path(path_data,MAX_PATH_LENGTH);
 
 
     /**** PARSING COMMAND LINE OPTIONS ****/
     while ((c = getopt (argc, argv, "c:m:F:?hV")) != -1) {
 		switch (c) {
 			case 'c':
-				//path_len = read_path_from_csv(optarg, path_data,MAX_PATH_LENGTH);
-                //if (path_len <= 0) return -1;
+				path_len = read_path_from_csv(optarg, path_data,MAX_PATH_LENGTH);
+                if (path_len <= 0) return -1;
 				break;
 			case 'm':
-				//path_len = read_path_from_raster_matrix(optarg, path_data,MAX_PATH_LENGTH);
-                //if (path_len <= 0) return -1;
+				path_len = read_path_from_raster_matrix(optarg, path_data,MAX_PATH_LENGTH);
+                if (path_len <= 0) return -1;
 				break;
 			case 'F':
 				Fs = atof(optarg);
@@ -113,13 +109,27 @@ int main(int argc,char *argv[]){
 				break;
 		}
 	}
+    printf("Path length = %d\n",path_len);
 
     /*Digilent Analog discovery 2 stuff */
     HDWF hdwf;
     //double rgdSamples[4096];
     char szError[512] = {0};
+    //path_len = 4096;
 
     
+    // generate custom samples normalized to +-1
+    //for(int i = 0; i < 4096; i++) rgdSamples[i] = 2.0*i/4095-1;
+   
+    #if 0
+    printf("Open automatically the first available device\n");
+    if(!FDwfDeviceOpen(-1, &hdwf)) {
+        FDwfGetLastErrorMsg(szError);
+        printf("Device open failed\n\t%s", szError);
+        return 0;
+    
+    }
+    #else
     int nDev;
     //Enumerating all Analog Discovery 2 devices
     //FDwfEnum(3, &nDev); 
@@ -169,6 +179,7 @@ int main(int argc,char *argv[]){
         printf("Device open failed\n\t%s", szError);
         return 0;
     }
+    #endif
 
    
     
@@ -177,67 +188,103 @@ int main(int argc,char *argv[]){
     FDwfAnalogOutNodeDataInfo(hdwf, 0, AnalogOutNodeCarrier, &SamplesMin, &SamplesMax);
     printf("SamplesMin = %d,  SamplesMax = %d\n",SamplesMin,SamplesMax);
     
-    int frame_len = SamplesMax;
-    
+    int frame_len = LIMIT(path_len,SamplesMin,SamplesMax);
 
+    double *xSamples = (double*) malloc(frame_len*sizeof(double));
+    double *ySamples = (double*) malloc(frame_len*sizeof(double));
 
+    bool single_frame = (frame_len==path_len);
 
     for (int ch=0; ch <2;ch++){
         // enable first channel
         FDwfAnalogOutNodeEnableSet(hdwf, ch, AnalogOutNodeCarrier, true);
         // set custom waveform samples
-        FDwfAnalogOutNodeFrequencySet(hdwf, ch, AnalogOutNodeCarrier, Fs/frame_len);
+
+        if (single_frame)
+            FDwfAnalogOutNodeFrequencySet(hdwf, ch, AnalogOutNodeCarrier, Fs/frame_len);
+        else
+            FDwfAnalogOutNodeFrequencySet(hdwf, ch, AnalogOutNodeCarrier, Fs);
+
         // 2V amplitude, 4V pk2pk, for sample value -1 will output -2V, for 1 +2V
         // normalized to ±1 values
         FDwfAnalogOutNodeAmplitudeSet(hdwf, ch, AnalogOutNodeCarrier, 1);
-        FDwfAnalogOutNodeFunctionSet(hdwf, ch, AnalogOutNodeCarrier, funcCustom);
     }
-    //Set channel 1 to follow channel 0
+    if (single_frame){
+        FDwfAnalogOutNodeFunctionSet(hdwf, 0, AnalogOutNodeCarrier, funcCustom);
+        FDwfAnalogOutNodeFunctionSet(hdwf, 1, AnalogOutNodeCarrier, funcCustom);
+    }
+    else{
+        FDwfAnalogOutNodeFunctionSet(hdwf, 0, AnalogOutNodeCarrier, funcPlay);
+        FDwfAnalogOutNodeFunctionSet(hdwf, 1, AnalogOutNodeCarrier, funcPlay);
+    }
     FDwfAnalogOutTriggerSourceSet(hdwf, 0, trigsrcNone); 
+    //Set channel 1 to follow channel 0
     FDwfAnalogOutMasterSet(hdwf, 1, 0);  
         
-    double *xSamples = (double*) malloc(frame_len*sizeof(double));
-    double *ySamples = (double*) malloc(frame_len*sizeof(double));
-    
-    frame_len = gen_demo_path(xSamples,ySamples,frame_len,1);
+
     //Send first (and perhaps only) data set to HW
+    for (int ix=0; ix < frame_len;ix++){
+        xSamples[ix] = path_data[ix][0];
+        ySamples[ix] = path_data[ix][1];
+    }
     FDwfAnalogOutNodeDataSet(hdwf, 0, AnalogOutNodeCarrier, xSamples, frame_len);
     FDwfAnalogOutNodeDataSet(hdwf, 1, AnalogOutNodeCarrier, ySamples, frame_len);
     // start signal generation. Only start channel 0 (master), channel 1 (slave) is set to follow
     FDwfAnalogOutConfigure(hdwf, 0, true);
     
-    // it will run until stopped or device closed
-
-    time_t t0 = time(NULL);
-    time_t t1 = time(NULL);
-
-    clock_t begin,end;
-    double time_spent = 0;
-
-    int count=0;
-    while ((t1-t0)<10){
-        t1 = time(NULL);
-        
-        frame_len = gen_demo_path(xSamples,ySamples,frame_len,count%2);
-        //Send first (and perhaps only) data set to HW
-        begin = clock();
-
-        //-- This part takes about 13ms with an Analog Discovery2 via USB, during which the output is stuck at its state
-        FDwfAnalogOutNodeDataSet(hdwf, 0, AnalogOutNodeCarrier, xSamples, frame_len);
-        FDwfAnalogOutNodeDataSet(hdwf, 1, AnalogOutNodeCarrier, ySamples, frame_len);
-        FDwfAnalogOutConfigure(hdwf, 0, true);
-        //-- This part end
-
-        end = clock();
-        
-        time_spent += (double)(end - begin);
-
-        Wait(0.02);
-        count++;
-        //usleep(100e3);
+    if (single_frame){
+        printf("Generating custom waveform for 5 seconds...\n");    
+        // it will run until stopped or device closed
+        Wait(5);
+        printf("done\n");
     }
-    time_spent /= (CLOCKS_PER_SEC * count);
-    printf("Average programming time = %fus\n",time_spent*1e6);
+    else{
+        //First frame_len of data is allready sent 
+        int path_offset[2] = {frame_len, frame_len};
+
+        time_t t0 = time(NULL);
+        time_t t1 = time(NULL);
+
+        while ((t1-t0)<10){
+            int transfer_size = INT_MAX;        
+            for (int ch=0;ch<2;ch++){
+                //printf("LOOP %d: Samples left = %d\n",loop,samples_left);
+                //Wait untill a minimum number of transfres are possible
+                int data_free;
+                int data_lost;
+                int data_corrupted;
+                DwfState ch_status;
+                
+                FDwfAnalogOutStatus(hdwf, ch, &(ch_status)); 
+                FDwfAnalogOutNodePlayStatus(hdwf, ch, AnalogOutNodeCarrier,&(data_free), &(data_lost), &(data_corrupted));
+
+                if (data_lost || data_corrupted){
+                    printf("CH %d free:%d lost:%d corrupted:%d\n",ch,data_free,data_lost, data_corrupted);
+                }
+                transfer_size = MIN(transfer_size,data_free);
+            }
+            if (transfer_size>(SamplesMax/4)){
+                for (int ch=0;ch<2;ch++){
+
+                    //Calculate number of samples to copy from circular input buffer
+                    int block1_len = MIN(path_len - path_offset[ch], transfer_size);
+                    int block2_len = transfer_size-block1_len;
+                    for (int ix=0; ix < block1_len;ix++){
+                        xSamples[ix] = path_data[ix+path_offset[ch]][ch];
+                    }
+                    for (int ix=0; ix < block2_len;ix++){
+                        xSamples[block1_len+ix] = path_data[ix][ch];
+                    }
+                    FDwfAnalogOutNodePlayData(hdwf, ch, AnalogOutNodeCarrier,xSamples,transfer_size); 
+                    //printf("Loading %d samples to ch %d   offset = %d\n", transfer_size,ch, path_offset[ch]);
+                    
+                    path_offset[ch] = (path_offset[ch]+transfer_size)%path_len;
+                }
+            }
+            t1 = time(NULL);
+            usleep(100);
+        }
+    }
 
     // on close device is stopped and configuration lost
     FDwfDeviceCloseAll();
